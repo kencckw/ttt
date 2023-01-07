@@ -1,0 +1,153 @@
+stateMachine:
+  CIR00027,CIR00017:
+    deposit:
+      null:
+        transitions: ['pending', 'paid']
+      pending:
+        transitions: ['paid']
+        validation:
+          operation:
+            eq:
+              - $type
+              - $amount.amount
+              - $amount.currency
+              - $createDate
+              - $merchantId
+              - $merchantWalletId
+              - $source.id
+              - $trackingRef
+            ne:
+              - $updateDate
+    withdrawal,position:
+      null:
+        transitions: ['pending', 'complete', 'failed']
+      pending:
+        transitions: ['complete', 'failed']
+        validation:
+          operation:
+            eq:
+              - $type
+              - $amount.amount
+              - $amount.currency
+              - $createDate
+              - $merchantId
+              - $merchantWalletId
+              - $source.id
+              - $trackingRef
+            ne:
+              - $updateDate
+
+event:
+  - type: state_change
+    # 輸入參數: event.input.channelTransId, id, channelType
+    params:
+      transaction_type: deposit # withdrawal, position, account, webhook
+      to:
+        in: ['paid']
+    actions:
+      - type: kafka
+        order: 2
+        params:
+          topic: transaction_message
+          message:
+            gateway_trans_id: $event.data.gatewayTransId
+            channel_trans_id: $event.data.channelTransId
+
+  - type: webhook
+    # event.input 與 event.params 匹配，如全部相等則觸發成功
+    # 輸出參數: event.output.transactionType & channelTransId & accountId & channelType & request
+    params:
+      transactionType:
+        in: ['deposit', 'withdraw', 'account', 'position']
+      accountId: CIR00027
+    actions:
+      - type: lock_transaction
+        order: 1
+        params:
+          accountId: $event.input.accountId
+          transactionType: $event.input.transactionType
+          channelTransId: javascript:{JSON.parse($event.input.request.body.Message).payment.id}
+      - type: channel_client
+        order: 2
+        params:
+          method: get_transaction
+          accountId: $event.input.accountId
+          transactionType: $event.input.transactionType
+          channelTransId: javascript:{JSON.parse($event.input.request.body.Message).payment.id}
+      - type: state_machine
+        order: 3
+        params:
+          validation:
+            eq:
+              - $type
+              - $amount.amount
+              - $amount.currency
+              - $createDate
+              - $merchantId
+              - $merchantWalletId
+              - $source.id
+              - $trackingRef
+            ne:
+              - $updateDate
+          values:
+            accountId: $event.input.accountId
+            transactionType: $event.input.transactionType
+            channelTransId: javascript:{JSON.parse($event.input.request.body.Message).payment.id}
+            data: $actions.channel_client.output.response.body.data
+          optimisticLock: # timezone 問題
+            updatedAt: ((.actions.channel_client.output.response.body.data.updateDate[0:19] + "Z"|fromdateiso8601)*1000 + (.actions.channel_client.output.response.body.data.updateDate[20:23]|tonumber))
+      - type: unlock_transaction
+        order: 1
+        params:
+          accountId: $event.input.accountId
+          transactionType: $event.input.transactionType
+          channelTransId: javascript:{JSON.parse($event.input.request.body.Message).payment.id}
+
+  - type: polling
+    params:
+      trans_code: DEPOSIT_APPLY
+    actions:
+      - type: lock_transaction
+        order: 1
+        params:
+          channelTransId: $event.output.channelTransId
+          channelType: $event.output.channelType
+
+      - type: state_machine
+        order: 3
+        params:
+          channelTransId: $event.output.channelTransId
+          channelType: $event.output.channelType
+          data: $actions[2]
+
+  - type: grpc
+    # 輸出參數: event.output.request
+    params:
+      interface: ChargeService.charge
+    actions:
+      - type: grpc
+        order: 1
+        params:
+          account_id: $event.input.accountId
+          method: create_order
+          request:
+            amount: $event.input.amount
+            currency: $event.input.currency
+      - type: channel_client # 輸出 output.response
+        order: 1
+        params:
+          account_id: $event.input.accountId
+          request:
+            amount: $event.input.amount
+            currency: $event.input.currency
+      - type: state_machine
+        order: 2
+        params:
+          channelTransId: $event.output.channelTransId
+          channelType: $event.output.channelType
+          data: $actions[0].output.request.body.data
+      - type: schedule_polling
+        order: 3
+        params:
+          channelTransId: $event.output.channelTransId
+          channelType: $event.output.channelType

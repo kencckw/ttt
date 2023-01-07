@@ -1,0 +1,7 @@
+/type:
+  eq: 'deposit'
+/amount/amount: 10
+/amount/currency:
+  ne: 'USD'
+/id:
+  in: ['1', '2']

@@ -1,0 +1,5 @@
+type: deposit
+amount:
+  amount: 10
+  currency: EUR
+id: "2"
